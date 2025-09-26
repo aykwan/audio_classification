@@ -213,7 +213,8 @@ class AudioVisualizer:
             cmap='viridis',
             hop_length=512
         )
-        plt.colorbar(format='%+2.0f dB', ax=ax)
+        im = ax.imshow(mfcc, aspect='auto', origin='lower', cmap='viridis')
+        cbar = plt.colorbar(im, ax=ax, format='%+2.0f dB')
         plt.title('MFCC Features', fontsize=16, fontweight='bold')
         plt.xlabel('Time (s)', fontsize=12)
         plt.ylabel('MFCC Coefficients', fontsize=12)
