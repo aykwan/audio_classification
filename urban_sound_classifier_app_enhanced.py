@@ -6,26 +6,11 @@ import librosa
 import librosa.display
 import matplotlib.pyplot as plt
 import seaborn as sns
-import tensorflow as tf
-from tensorflow.keras.models import Sequential, load_model
-from tensorflow.keras.layers import Input, Conv2D, MaxPooling2D, Dropout, Flatten, Dense
-from tensorflow.keras.optimizers import Adam
-from sklearn.svm import SVC
-from sklearn.ensemble import RandomForestClassifier, HistGradientBoostingClassifier
-from sklearn.metrics import classification_report, confusion_matrix
-import pickle
 import os
-import random
+import glob
 import warnings
-import io
-from typing import Tuple, Optional, Dict, Any
+from typing import Dict, Any, Optional
 warnings.filterwarnings('ignore')
-
-# Set random seeds for reproducibility
-random_seed = 42
-np.random.seed(random_seed)
-tf.random.set_seed(random_seed)
-random.seed(random_seed)
 
 # Configure Streamlit page
 st.set_page_config(
@@ -49,274 +34,248 @@ CLASS_NAMES = {
     9: 'street_music'
 }
 
-class AudioClassifier:
-    """Main audio classification class handling all models and predictions"""
+class AudioDataLoader:
+    """Handles loading audio files and CSV results"""
 
     def __init__(self):
-        self.models = {}
-        self.model_loaded = {
-            'SVM': False,
-            'Random Forest': False, 
-            'Gradient Boosting': False,
-            'CNN': False
-        }
-        self.load_models()
+        self.data_folder = "Data"
+        self.csv_file = "all_models_predictions_comparison.csv"
+        self.results_df = None
+        self.audio_files = []
+        self.load_data()
 
-    def load_models(self):
-        """Load pre-trained models if available"""
-        model_files = {
-            'SVM': 'models/svm_model.pkl',
-            'Random Forest': 'models/rf_model.pkl',
-            'Gradient Boosting': 'models/gb_model.pkl',
-            'CNN': 'models/cnn_model.h5'
-        }
-
-        for model_name, file_path in model_files.items():
-            try:
-                if os.path.exists(file_path):
-                    if model_name == 'CNN':
-                        self.models[model_name] = load_model(file_path)
-                    else:
-                        with open(file_path, 'rb') as f:
-                            self.models[model_name] = pickle.load(f)
-                    self.model_loaded[model_name] = True
-                    st.sidebar.success(f"✅ {model_name} model loaded")
-                else:
-                    st.sidebar.info(f"ℹ️ {model_name} model not found - using demo mode")
-            except Exception as e:
-                st.sidebar.error(f"❌ Error loading {model_name}: {str(e)}")
-
-    def extract_mfcc_features(self, audio_file, n_mfcc: int = 40, max_len: int = 174) -> Optional[np.ndarray]:
-        """Extract MFCC features for CNN model"""
+    def load_data(self):
+        """Load the CSV results and discover audio files"""
         try:
-            if hasattr(audio_file, 'read'):
-                audio_data = audio_file.read()
-                y, sr = librosa.load(io.BytesIO(audio_data), sr=None, mono=True)
+            # Load CSV results
+            if os.path.exists(self.csv_file):
+                self.results_df = pd.read_csv(self.csv_file)
+                st.sidebar.success(f"Loaded {len(self.results_df)} test results")
             else:
-                y, sr = librosa.load(audio_file, sr=None, mono=True)
+                st.sidebar.error(f"Results file not found: {self.csv_file}")
+                return
 
-            mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=n_mfcc)
+            # Discover audio files in Data folder
+            audio_extensions = ['*.wav', '*.mp3', '*.flac', '*.ogg', '*.m4a']
+            for ext in audio_extensions:
+                pattern = os.path.join(self.data_folder, "**", ext)
+                self.audio_files.extend(glob.glob(pattern, recursive=True))
 
-            # Pad/truncate to fixed length
-            if mfcc.shape[1] < max_len:
-                pad_width = max_len - mfcc.shape[1]
-                mfcc = np.pad(mfcc, ((0, 0), (0, pad_width)), mode='constant')
-            else:
-                mfcc = mfcc[:, :max_len]
+            # Also check for files directly in Data folder
+            for ext in audio_extensions:
+                pattern = os.path.join(self.data_folder, ext)
+                self.audio_files.extend(glob.glob(pattern, recursive=False))
 
-            return mfcc
+            # Extract just the filenames for dropdown
+            self.audio_files = [os.path.basename(f) for f in self.audio_files]
+            self.audio_files = sorted(list(set(self.audio_files)))  # Remove duplicates and sort
+
+            st.sidebar.info(f"Found {len(self.audio_files)} audio files")
+
         except Exception as e:
-            st.error(f"Error extracting MFCC features: {e}")
+            st.sidebar.error(f"Error loading data: {str(e)}")
+
+    def get_file_results(self, filename: str) -> Optional[Dict[str, Any]]:
+        """Get results for a specific audio file from CSV"""
+        if self.results_df is None:
             return None
 
-    def extract_traditional_features(self, audio_file) -> Optional[np.ndarray]:
-        """Extract traditional features for SVM/RF/GB models"""
-        try:
-            if hasattr(audio_file, 'read'):
-                audio_data = audio_file.read()
-                y, sr = librosa.load(io.BytesIO(audio_data), sr=None, mono=True)
-            else:
-                y, sr = librosa.load(audio_file, sr=None, mono=True)
+        # Find the row matching the filename
+        file_results = self.results_df[self.results_df['slice_file_name'] == filename]
 
-            # Extract MFCCs and delta MFCCs (as per practicum)
-            mfcc = librosa.feature.mfcc(
-                y=y, sr=sr, n_mfcc=13, n_fft=2048, 
-                n_mels=40, fmin=20, fmax=sr//2
-            )
-
-            width = min(9, mfcc.shape[1])
-            if width < 3:
-                width = 3
-            if width % 2 == 0:
-                width -= 1
-
-            mfcc_delta = librosa.feature.delta(mfcc, width=width)
-
-            # Combine MFCC and delta MFCC
-            combined = np.concatenate([mfcc, mfcc_delta], axis=0)
-            combined_mean = np.mean(combined, axis=1)
-
-            return combined_mean
-        except Exception as e:
-            st.error(f"Error extracting traditional features: {e}")
+        if file_results.empty:
             return None
 
-    def predict(self, features: np.ndarray, model_name: str) -> Tuple[int, float, np.ndarray]:
-        """Make prediction using specified model"""
-        if self.model_loaded[model_name]:
-            # Use actual trained model
-            model = self.models[model_name]
+        # Get the first match (there should only be one)
+        result = file_results.iloc[0]
 
-            if model_name == 'CNN':
-                # Prepare features for CNN
-                features_reshaped = features.reshape(1, 40, 174, 1)
-                probabilities = model.predict(features_reshaped, verbose=0)[0]
-                prediction = np.argmax(probabilities)
-                confidence = probabilities[prediction]
-            else:
-                # Traditional ML models
-                features_reshaped = features.reshape(1, -1)
-                probabilities = model.predict_proba(features_reshaped)[0]
-                prediction = np.argmax(probabilities)
-                confidence = probabilities[prediction]
-        else:
-            # Demo mode with simulated predictions
-            np.random.seed(hash(str(features.sum())) % 2**32)  # Deterministic based on features
-
-            if model_name == 'SVM':
-                probabilities = np.random.dirichlet(np.ones(10) * 2)
-            elif model_name == 'Random Forest':
-                probabilities = np.random.dirichlet(np.ones(10) * 3)
-            elif model_name == 'Gradient Boosting':
-                probabilities = np.random.dirichlet(np.ones(10) * 2.5)
-            else:  # CNN
-                probabilities = np.random.dirichlet(np.ones(10) * 4)
-
-            prediction = np.argmax(probabilities)
-            confidence = probabilities[prediction]
-
-        return prediction, confidence, probabilities
-
-    @staticmethod
-    def build_cnn_model():
-        """Build the CNN model architecture from the practicum"""
-        model = Sequential([
-            Input(shape=(40, 174, 1)),
-            Conv2D(32, kernel_size=(3, 3), activation='relu'),
-            MaxPooling2D(pool_size=(2, 2)),
-            Dropout(0.3),
-            Conv2D(64, kernel_size=(3, 3), activation='relu'),
-            MaxPooling2D(pool_size=(2, 2)),
-            Dropout(0.3),
-            Flatten(),
-            Dense(128, activation='relu'),
-            Dropout(0.3),
-            Dense(10, activation='softmax')
-        ])
-
-        model.compile(optimizer='adam', 
-                      loss='sparse_categorical_crossentropy', 
-                      metrics=['accuracy'])
-        return model
+        return {
+            'filename': result['slice_file_name'],
+            'actual_class': result['actual_class'],
+            'actual_class_name': result['actual_class_name'],
+            'fold': result.get('fold', 'Unknown'),
+            'models': {
+                'SVM': {
+                    'predicted': result['svm_predicted'],
+                    'predicted_name': result['svm_predicted_name'],
+                    'confidence': result['svm_confidence'],
+                    'correct': bool(result['svm_correct'])
+                },
+                'Random Forest': {
+                    'predicted': result['rf_predicted'],
+                    'predicted_name': result['rf_predicted_name'],
+                    'confidence': result['rf_confidence'],
+                    'correct': bool(result['rf_correct'])
+                },
+                'Gradient Boosting': {
+                    'predicted': result['gb_predicted'],
+                    'predicted_name': result['gb_predicted_name'],
+                    'confidence': result['gb_confidence'],
+                    'correct': bool(result['gb_correct'])
+                },
+                'CNN': {
+                    'predicted': result['cnn_predicted'],
+                    'predicted_name': result['cnn_predicted_name'],
+                    'confidence': result['cnn_confidence'],
+                    'correct': bool(result['cnn_correct'])
+                }
+            },
+            'ensemble': {
+                'predicted': result.get('ensemble_predicted', 'N/A'),
+                'predicted_name': result.get('ensemble_predicted_name', 'N/A'),
+                'correct': bool(result.get('ensemble_correct', False))
+            },
+            'model_agreement': result.get('model_agreement', 4),
+            'models_agree': bool(result.get('models_agree', False))
+        }
 
 class AudioVisualizer:
     """Handles all visualization tasks"""
 
     @staticmethod
-    def plot_mfcc_features(mfcc: np.ndarray) -> plt.Figure:
-        """Plot MFCC features visualization"""
-        fig, ax = plt.subplots(figsize=(14, 8))
-        librosa.display.specshow(
-            mfcc, 
-            x_axis='time', 
-            ax=ax, 
-            cmap='viridis',
-            hop_length=512
-        )
-        im = ax.imshow(mfcc, aspect='auto', origin='lower', cmap='viridis')
-        cbar = plt.colorbar(im, ax=ax, format='%+2.0f dB')
-        plt.title('MFCC Features', fontsize=16, fontweight='bold')
-        plt.xlabel('Time (s)', fontsize=12)
-        plt.ylabel('MFCC Coefficients', fontsize=12)
-        plt.tight_layout()
-        return fig
+    def plot_mfcc_features(audio_path: str) -> plt.Figure:
+        """Plot MFCC features visualization - FIXED VERSION"""
+        try:
+            y, sr = librosa.load(audio_path, sr=None, mono=True)
+            mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=40)
+
+            fig, ax = plt.subplots(figsize=(14, 8))
+
+            # Use imshow instead of librosa.display.specshow to fix colorbar issue
+            im = ax.imshow(mfcc, 
+                          aspect='auto', 
+                          origin='lower',
+                          cmap='viridis',
+                          interpolation='nearest')
+
+            # Now we can add colorbar safely since im is a mappable object
+            cbar = plt.colorbar(im, ax=ax, format='%+2.0f dB')
+            cbar.set_label('MFCC Magnitude (dB)', rotation=270, labelpad=15)
+
+            ax.set_title('MFCC Features', fontsize=16, fontweight='bold')
+            ax.set_xlabel('Time Frames', fontsize=12)
+            ax.set_ylabel('MFCC Coefficients', fontsize=12)
+            ax.grid(True, alpha=0.3)
+
+            plt.tight_layout()
+            return fig
+        except Exception as e:
+            st.error(f"Error plotting MFCC features: {e}")
+            return None
 
     @staticmethod
-    def plot_waveform(y: np.ndarray, sr: int) -> plt.Figure:
+    def plot_waveform(audio_path: str) -> plt.Figure:
         """Plot audio waveform"""
-        fig, ax = plt.subplots(figsize=(14, 4))
-        time = np.linspace(0, len(y)/sr, len(y))
-        ax.plot(time, y, alpha=0.7, color='blue')
-        ax.set_xlabel('Time (s)', fontsize=12)
-        ax.set_ylabel('Amplitude', fontsize=12)
-        ax.set_title('Audio Waveform', fontsize=16, fontweight='bold')
-        ax.grid(True, alpha=0.3)
+        try:
+            y, sr = librosa.load(audio_path, sr=None, mono=True)
+
+            fig, ax = plt.subplots(figsize=(14, 4))
+            time = np.linspace(0, len(y)/sr, len(y))
+            ax.plot(time, y, alpha=0.7, color='blue')
+            ax.set_xlabel('Time (s)', fontsize=12)
+            ax.set_ylabel('Amplitude', fontsize=12)
+            ax.set_title('Audio Waveform', fontsize=16, fontweight='bold')
+            ax.grid(True, alpha=0.3)
+            plt.tight_layout()
+            return fig
+        except Exception as e:
+            st.error(f"Error plotting waveform: {e}")
+            return None
+
+    @staticmethod
+    def plot_model_predictions(results: Dict[str, Any]) -> plt.Figure:
+        """Plot all model predictions as comparison chart"""
+        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(16, 12))
+        axes = [ax1, ax2, ax3, ax4]
+        models = ['SVM', 'Random Forest', 'Gradient Boosting', 'CNN']
+
+        for i, (model, ax) in enumerate(zip(models, axes)):
+            model_data = results['models'][model]
+
+            # Create a simple bar showing prediction vs actual
+            categories = ['Predicted', 'Actual']
+            pred_class = model_data['predicted']
+            actual_class = results['actual_class']
+
+            bars = ax.bar(categories, [pred_class, actual_class], 
+                         color=['orange' if model_data['correct'] else 'red', 'green'],
+                         alpha=0.7)
+
+            ax.set_title(f"{model} - {'Correct' if model_data['correct'] else 'Wrong'}", 
+                        fontweight='bold')
+            ax.set_ylabel('Class ID')
+            ax.set_ylim(0, 9)
+
+            # Add text labels
+            ax.text(0, pred_class + 0.1, f"{model_data['predicted_name']}", 
+                   ha='center', fontweight='bold')
+            ax.text(1, actual_class + 0.1, f"{results['actual_class_name']}", 
+                   ha='center', fontweight='bold')
+
+            # Add confidence score
+            ax.text(0.02, 0.98, f'Confidence: {model_data["confidence"]:.1%}', 
+                    transform=ax.transAxes, fontweight='bold',
+                    bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.8))
+
+        plt.suptitle(f'Model Predictions for {results["filename"]}', fontsize=16, fontweight='bold')
         plt.tight_layout()
         return fig
 
     @staticmethod
-    def plot_prediction_probabilities(probabilities: np.ndarray, model_name: str) -> plt.Figure:
-        """Plot prediction probabilities as bar chart"""
-        fig, ax = plt.subplots(figsize=(14, 8))
+    def plot_confidence_comparison(results: Dict[str, Any]) -> plt.Figure:
+        """Plot confidence scores for all models"""
+        fig, ax = plt.subplots(figsize=(12, 6))
 
-        classes = [CLASS_NAMES[i].replace('_', ' ').title() for i in range(10)]
-        colors = plt.cm.Set3(np.linspace(0, 1, 10))
+        models = list(results['models'].keys())
+        confidences = [results['models'][model]['confidence'] for model in models]
+        correctness = [results['models'][model]['correct'] for model in models]
 
-        bars = ax.bar(classes, probabilities, color=colors, alpha=0.8, edgecolor='black', linewidth=1)
+        colors = ['green' if correct else 'red' for correct in correctness]
+        bars = ax.bar(models, confidences, color=colors, alpha=0.7)
 
-        # Highlight the predicted class
-        max_idx = np.argmax(probabilities)
-        bars[max_idx].set_color('orange')
-        bars[max_idx].set_edgecolor('red')
-        bars[max_idx].set_linewidth(2)
-
-        ax.set_xlabel('Sound Classes', fontsize=12, fontweight='bold')
-        ax.set_ylabel('Probability', fontsize=12, fontweight='bold')
-        ax.set_title(f'{model_name} - Prediction Probabilities', fontsize=16, fontweight='bold')
-        ax.set_ylim(0, max(probabilities) * 1.1)
+        ax.set_xlabel('Models', fontsize=12, fontweight='bold')
+        ax.set_ylabel('Confidence Score', fontsize=12, fontweight='bold')
+        ax.set_title('Model Confidence Comparison', fontsize=16, fontweight='bold')
+        ax.set_ylim(0, 1)
 
         # Add value labels on bars
-        for bar, prob in zip(bars, probabilities):
+        for bar, conf in zip(bars, confidences):
             height = bar.get_height()
-            ax.text(bar.get_x() + bar.get_width()/2., height,
-                    f'{prob:.1%}',
+            ax.text(bar.get_x() + bar.get_width()/2., height + 0.01,
+                    f'{conf:.1%}',
                     ha='center', va='bottom', fontweight='bold')
 
-        plt.xticks(rotation=45, ha='right')
+        # Add legend
+        from matplotlib.patches import Patch
+        legend_elements = [Patch(facecolor='green', alpha=0.7, label='Correct'),
+                          Patch(facecolor='red', alpha=0.7, label='Incorrect')]
+        ax.legend(handles=legend_elements, loc='upper right')
+
         plt.grid(axis='y', alpha=0.3)
         plt.tight_layout()
-
         return fig
-
-def create_comparison_chart(all_predictions: Dict[str, Dict]) -> plt.Figure:
-    """Create a comparison chart of all model predictions"""
-    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(16, 12))
-    axes = [ax1, ax2, ax3, ax4]
-    models = list(all_predictions.keys())
-
-    for i, (model, ax) in enumerate(zip(models, axes)):
-        probabilities = all_predictions[model]['probabilities']
-        classes = [CLASS_NAMES[j].replace('_', ' ').title() for j in range(10)]
-
-        bars = ax.bar(classes, probabilities, alpha=0.7)
-        max_idx = np.argmax(probabilities)
-        bars[max_idx].set_color('orange')
-
-        ax.set_title(f'{model}', fontweight='bold')
-        ax.set_ylabel('Probability')
-        ax.tick_params(axis='x', rotation=45)
-        ax.grid(axis='y', alpha=0.3)
-
-        # Add confidence score
-        confidence = all_predictions[model]['confidence']
-        ax.text(0.02, 0.98, f'Confidence: {confidence:.1%}', 
-                transform=ax.transAxes, fontweight='bold',
-                bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.8))
-
-    plt.suptitle('Model Comparison - Prediction Probabilities', fontsize=16, fontweight='bold')
-    plt.tight_layout()
-    return fig
 
 def main():
     """Main Streamlit application"""
 
-    # Initialize classifier
-    if 'classifier' not in st.session_state:
-        st.session_state.classifier = AudioClassifier()
+    # Initialize data loader
+    if 'data_loader' not in st.session_state:
+        st.session_state.data_loader = AudioDataLoader()
 
-    classifier = st.session_state.classifier
+    data_loader = st.session_state.data_loader
 
     # Header
-    st.title("🎵 UrbanSound8K Audio Classification System")
-    st.markdown("### *Advanced Multi-Model Audio Classification with Real-Time Analysis*")
+    st.title("🎵 UrbanSound8K Audio Classification Results")
+    st.markdown("### *Pre-tested Results from Cross-Validation Analysis*")
     st.markdown("---")
 
     # Description
     st.markdown("""
-    This application demonstrates state-of-the-art audio classification using the UrbanSound8K dataset. 
-    Upload an audio file to analyze it with multiple machine learning models and compare their predictions.
+    This application displays the results from our comprehensive testing of UrbanSound8K audio classification 
+    using four different machine learning models. Select an audio file from the dropdown to see how each 
+    model performed on that specific sample.
 
-    **Supported Models:**
+    **Models Tested:**
     - 🎯 **SVM** (Support Vector Machine) - Traditional ML approach
     - 🌲 **Random Forest** - Ensemble method with decision trees  
     - 🚀 **Gradient Boosting** - Advanced boosting technique
@@ -324,226 +283,240 @@ def main():
     """)
 
     # Sidebar
-    st.sidebar.title("📊 Model Information")
+    st.sidebar.title("Dataset Information")
 
-    # Model status
-    st.sidebar.subheader("🔧 Model Status")
-    for model_name, loaded in classifier.model_loaded.items():
-        status = "🟢 Loaded" if loaded else "🟡 Demo Mode"
-        st.sidebar.write(f"**{model_name}:** {status}")
+    if data_loader.results_df is not None:
+        # Overall statistics
+        st.sidebar.subheader("Overall Accuracies")
+        total_samples = len(data_loader.results_df)
 
-    st.sidebar.markdown("---")
+        accuracies = {
+            'SVM': data_loader.results_df['svm_correct'].mean(),
+            'Random Forest': data_loader.results_df['rf_correct'].mean(),
+            'Gradient Boosting': data_loader.results_df['gb_correct'].mean(),
+            'CNN': data_loader.results_df['cnn_correct'].mean()
+        }
 
-    # Performance metrics
-    st.sidebar.subheader("📈 Cross-Validation Results")
-    performance_data = {
-        'Model': ['SVM', 'Random Forest', 'Gradient Boosting', 'CNN'],
-        'Accuracy': ['47.95%', '50.08%', '52.54%', '91.55%']
-    }
-    st.sidebar.table(pd.DataFrame(performance_data))
+        for model, acc in accuracies.items():
+            st.sidebar.write(f"**{model}:** {acc:.1%}")
 
-    st.sidebar.markdown("---")
+        if 'ensemble_correct' in data_loader.results_df.columns:
+            ens_acc = data_loader.results_df['ensemble_correct'].mean()
+            st.sidebar.write(f"**Ensemble:** {ens_acc:.1%}")
 
-    # Class information
-    st.sidebar.subheader("🎯 Audio Classes")
-    for idx, name in CLASS_NAMES.items():
-        emoji = ['❄️', '🚗', '👶', '🐕', '🔧', '🚙', '🔫', '🔨', '🚨', '🎵'][idx]
-        st.sidebar.write(f"**{idx}.** {emoji} {name.replace('_', ' ').title()}")
+        st.sidebar.write(f"**Total Samples:** {total_samples:,}")
+
+        st.sidebar.markdown("---")
+
+        # Class distribution
+        st.sidebar.subheader("Class Distribution")
+        class_counts = data_loader.results_df['actual_class_name'].value_counts()
+        for class_name, count in class_counts.items():
+            emoji = ['❄️', '🚗', '👶', '🐕', '🔧', '🚙', '🔫', '🔨', '🚨', '🎵'][
+                list(CLASS_NAMES.values()).index(class_name)
+            ]
+            st.sidebar.write(f"{emoji} **{class_name.replace('_', ' ').title()}:** {count}")
 
     # Main interface
     col1, col2 = st.columns([1, 2])
 
     with col1:
-        st.subheader("📤 Upload Audio File")
-        uploaded_file = st.file_uploader(
-            "Choose an audio file", 
-            type=['wav', 'mp3', 'flac', 'ogg', 'm4a'],
-            help="Upload an audio file in WAV, MP3, FLAC, OGG, or M4A format"
+        st.subheader("🎵 Select Audio File")
+
+        if not data_loader.audio_files:
+            st.error("No audio files found in Data folder")
+            st.info("Expected folder structure: Data/{audio_files}")
+            return
+
+        # Dropdown for file selection
+        selected_file = st.selectbox(
+            "Choose an audio file to analyze:",
+            options=[""] + data_loader.audio_files,
+            index=0,
+            help="Select from pre-tested audio files in the dataset"
         )
 
-        if uploaded_file is not None:
-            # File information
-            st.success(f"✅ File uploaded: {uploaded_file.name}")
-            st.info(f"📊 File size: {uploaded_file.size:,} bytes")
+        if selected_file:
+            # Get results for selected file
+            results = data_loader.get_file_results(selected_file)
 
-            # Audio player
-            st.subheader("🎧 Audio Player")
-            st.audio(uploaded_file, format='audio/wav')
+            if results is None:
+                st.error(f"No results found for {selected_file}")
+                st.info("Make sure the file was included in the cross-validation testing.")
+                return
+
+            # Display file info
+            st.success(f"File selected: {selected_file}")
+
+            # Audio player (try to find and play the file)
+            audio_path = None
+            possible_paths = [
+                os.path.join(data_loader.data_folder, selected_file),
+                os.path.join(data_loader.data_folder, f"fold{results['fold']}", selected_file),
+            ]
+
+            for path in possible_paths:
+                if os.path.exists(path):
+                    audio_path = path
+                    break
+
+            if audio_path:
+                st.subheader("🎧 Audio Player")
+                st.audio(audio_path)
+            else:
+                st.warning("⚠️ Audio file not found for playback")
+
+            # File details
+            st.subheader("📋 File Details")
+            st.write(f"**Filename:** {results['filename']}")
+            st.write(f"**Actual Class:** {results['actual_class_name'].replace('_', ' ').title()}")
+            st.write(f"**Class ID:** {results['actual_class']}")
+            st.write(f"**Test Fold:** {results['fold']}")
 
             # Processing options
-            st.subheader("⚙️ Processing Options")
+            st.subheader("⚙️ Display Options")
             show_waveform = st.checkbox("Show Waveform", value=True)
             show_features = st.checkbox("Show MFCC Features", value=True)
-            show_comparison = st.checkbox("Show Model Comparison", value=True)
+            show_confidence = st.checkbox("Show Confidence Comparison", value=True)
 
     with col2:
-        if uploaded_file is not None:
-            st.subheader("🔍 Audio Analysis Results")
+        if selected_file and 'results' in locals():
+            st.subheader("🔍 Model Prediction Results")
 
-            # Reset file pointer
-            uploaded_file.seek(0)
+            # Results summary table
+            st.subheader("📊 Results Summary")
+            summary_data = []
 
-            # Processing indicator
-            with st.spinner("🔄 Processing audio file..."):
-                # Extract features
-                mfcc_features = classifier.extract_mfcc_features(uploaded_file)
-                uploaded_file.seek(0)  # Reset for traditional features
-                traditional_features = classifier.extract_traditional_features(uploaded_file)
+            for model_name, model_data in results['models'].items():
+                summary_data.append({
+                    'Model': model_name,
+                    'Predicted': f"{model_data['predicted']} ({model_data['predicted_name'].replace('_', ' ').title()})",
+                    'Actual': f"{results['actual_class']} ({results['actual_class_name'].replace('_', ' ').title()})",
+                    'Confidence': f"{model_data['confidence']:.1%}",
+                    'Result': "Correct" if model_data['correct'] else "Wrong"
+                })
 
-            if mfcc_features is not None and traditional_features is not None:
-                st.success("✅ Feature extraction completed!")
+            # Add ensemble if available
+            if results['ensemble']['predicted'] != 'N/A':
+                summary_data.append({
+                    'Model': 'Ensemble',
+                    'Predicted': f"{results['ensemble']['predicted']} ({results['ensemble']['predicted_name'].replace('_', ' ').title()})",
+                    'Actual': f"{results['actual_class']} ({results['actual_class_name'].replace('_', ' ').title()})",
+                    'Confidence': "N/A",
+                    'Result': "Correct" if results['ensemble']['correct'] else "Wrong"
+                })
 
-                # Optional visualizations
+            summary_df = pd.DataFrame(summary_data)
+            st.table(summary_df)
+
+            # Model agreement info
+            st.subheader("🤝 Model Agreement Analysis")
+            agreement_text = {
+                1: "🟢 All models agree",
+                2: "🟡 Models split into 2 groups", 
+                3: "🟠 3 different predictions",
+                4: "🔴 All models disagree"
+            }
+
+            agreement_level = results['model_agreement']
+            st.info(f"**Agreement Level:** {agreement_text.get(agreement_level, 'Unknown')}")
+
+            # Visualizations
+            if audio_path:
                 if show_waveform:
-                    uploaded_file.seek(0)
-                    audio_data = uploaded_file.read()
-                    y, sr = librosa.load(io.BytesIO(audio_data), sr=None, mono=True)
-
                     st.subheader("📊 Audio Waveform")
-                    fig_wave = AudioVisualizer.plot_waveform(y, sr)
-                    st.pyplot(fig_wave)
-                    plt.close(fig_wave)
+                    fig_wave = AudioVisualizer.plot_waveform(audio_path)
+                    if fig_wave:
+                        st.pyplot(fig_wave)
+                        plt.close(fig_wave)
 
                 if show_features:
                     st.subheader("📈 MFCC Features")
-                    fig_mfcc = AudioVisualizer.plot_mfcc_features(mfcc_features)
-                    st.pyplot(fig_mfcc)
-                    plt.close(fig_mfcc)
+                    fig_mfcc = AudioVisualizer.plot_mfcc_features(audio_path)
+                    if fig_mfcc:
+                        st.pyplot(fig_mfcc)
+                        plt.close(fig_mfcc)
 
-                # Model predictions
-                st.subheader("🤖 Classification Results")
+            # Model predictions visualization
+            st.subheader("🎯 Model Predictions Comparison")
+            fig_pred = AudioVisualizer.plot_model_predictions(results)
+            st.pyplot(fig_pred)
+            plt.close(fig_pred)
 
-                models = ['SVM', 'Random Forest', 'Gradient Boosting', 'CNN']
-                all_predictions = {}
+            if show_confidence:
+                st.subheader("📊 Model Confidence Comparison")
+                fig_conf = AudioVisualizer.plot_confidence_comparison(results)
+                st.pyplot(fig_conf)
+                plt.close(fig_conf)
 
-                # Create results summary
-                results_data = []
+            # Detailed analysis in tabs
+            st.subheader("🔍 Detailed Model Analysis")
+            tabs = st.tabs(list(results['models'].keys()))
 
-                for model_name in models:
-                    with st.spinner(f"Running {model_name} prediction..."):
-                        # Choose appropriate features
-                        features = mfcc_features if model_name == 'CNN' else traditional_features
-                        pred_class, confidence, probabilities = classifier.predict(features, model_name)
+            for i, (model_name, tab) in enumerate(zip(results['models'].keys(), tabs)):
+                with tab:
+                    model_data = results['models'][model_name]
 
-                        all_predictions[model_name] = {
-                            'prediction': pred_class,
-                            'confidence': confidence,
-                            'probabilities': probabilities,
-                            'class_name': CLASS_NAMES[pred_class]
-                        }
+                    # Key metrics
+                    col_a, col_b, col_c, col_d = st.columns([1, 1, 1, 1])
 
-                        results_data.append({
-                            'Model': model_name,
-                            'Predicted Class': pred_class,
-                            'Class Name': CLASS_NAMES[pred_class].replace('_', ' ').title(),
-                            'Confidence': f"{confidence:.2%}"
-                        })
+                    with col_a:
+                        st.metric("Predicted Class", model_data['predicted'])
+                    with col_b:
+                        st.metric("Predicted Name", model_data['predicted_name'].replace('_', ' ').title())
+                    with col_c:
+                        st.metric("Confidence", f"{model_data['confidence']:.2%}")
+                    with col_d:
+                        result_color = "normal" if model_data['correct'] else "inverse"
+                        st.metric("Result", "Correct" if model_data['correct'] else "Wrong")
 
-                # Display results summary
-                st.subheader("📋 Results Summary")
-                results_df = pd.DataFrame(results_data)
-                st.table(results_df)
+                    # Analysis
+                    if model_data['correct']:
+                        st.success(f"{model_name} correctly identified this as {model_data['predicted_name'].replace('_', ' ').title()}")
+                    else:
+                        st.error(f"{model_name} incorrectly predicted {model_data['predicted_name'].replace('_', ' ').title()} when it was actually {results['actual_class_name'].replace('_', ' ').title()}")
 
-                # Detailed model results in tabs
-                st.subheader("🔍 Detailed Analysis")
-                tabs = st.tabs(models)
+                    st.write(f"**Confidence Level:** {model_data['confidence']:.1%}")
 
-                for i, model_name in enumerate(models):
-                    with tabs[i]:
-                        pred_data = all_predictions[model_name]
-
-                        # Key metrics
-                        col_a, col_b, col_c = st.columns([1, 1, 1])
-
-                        with col_a:
-                            st.metric("Predicted Class", pred_data['prediction'])
-                        with col_b:
-                            st.metric("Class Name", pred_data['class_name'].replace('_', ' ').title())
-                        with col_c:
-                            st.metric("Confidence", f"{pred_data['confidence']:.2%}")
-
-                        # Probability distribution
-                        fig_prob = AudioVisualizer.plot_prediction_probabilities(
-                            pred_data['probabilities'], model_name
-                        )
-                        st.pyplot(fig_prob)
-                        plt.close(fig_prob)
-
-                        # Top predictions
-                        st.subheader("🏆 Top 3 Predictions")
-                        top_3_indices = np.argsort(pred_data['probabilities'])[::-1][:3]
-
-                        for rank, idx in enumerate(top_3_indices, 1):
-                            emoji = ['🥇', '🥈', '🥉'][rank-1]
-                            prob = pred_data['probabilities'][idx]
-                            class_name = CLASS_NAMES[idx].replace('_', ' ').title()
-                            st.write(f"{emoji} **{rank}. {class_name}** - {prob:.2%}")
-
-                # Model comparison
-                if show_comparison and len(all_predictions) > 1:
-                    st.subheader("⚖️ Model Comparison")
-
-                    fig_comparison = create_comparison_chart(all_predictions)
-                    st.pyplot(fig_comparison)
-                    plt.close(fig_comparison)
-
-                    # Consensus analysis
-                    st.subheader("🎯 Consensus Analysis")
-                    predictions = [all_predictions[model]['prediction'] for model in models]
-                    confidences = [all_predictions[model]['confidence'] for model in models]
-
-                    # Most common prediction
-                    most_common_pred = max(set(predictions), key=predictions.count)
-                    agreement_count = predictions.count(most_common_pred)
-
-                    col_x, col_y, col_z = st.columns([1, 1, 1])
-                    with col_x:
-                        st.metric("Consensus Class", CLASS_NAMES[most_common_pred].replace('_', ' ').title())
-                    with col_y:
-                        st.metric("Model Agreement", f"{agreement_count}/{len(models)}")
-                    with col_z:
-                        st.metric("Avg Confidence", f"{np.mean(confidences):.2%}")
-
-            else:
-                st.error("❌ Failed to extract features from the audio file. Please try a different file.")
+                    # Confidence interpretation
+                    if model_data['confidence'] > 0.8:
+                        st.info("High confidence prediction")
+                    elif model_data['confidence'] > 0.6:
+                        st.info("Moderate confidence prediction")
+                    else:
+                        st.warning("Low confidence prediction")
 
     # Technical details
-    with st.expander("🔧 Technical Implementation Details"):
+    with st.expander("🔧 About This Analysis"):
         st.markdown("""
-        ### Feature Extraction
+        ### Data Source
+        - **Dataset:** UrbanSound8K (8,732 audio samples)
+        - **Evaluation:** 10-fold cross-validation
+        - **Results File:** all_models_predictions_comparison.csv
 
-        **Traditional Models (SVM, Random Forest, Gradient Boosting):**
-        - 13 MFCC coefficients
-        - 13 Delta MFCC coefficients  
-        - Features averaged over time (26 total features)
-        - Parameters: n_fft=2048, n_mels=40, fmin=20Hz, fmax=Nyquist
+        ### Model Performance
+        - **SVM:** Traditional machine learning with RBF kernel
+        - **Random Forest:** 200-tree ensemble with optimized parameters
+        - **Gradient Boosting:** Histogram-based gradient boosting
+        - **CNN:** Deep learning with convolutional layers
 
-        **CNN Model:**
-        - 40 MFCC coefficients 
-        - 174 time frames (padded/truncated)
-        - Input shape: (40, 174, 1)
-        - Raw spectral-temporal representation
+        ### Features Used
+        - **Traditional Models:** 26 features (13 MFCC + 13 Delta MFCC coefficients)
+        - **CNN Model:** 40 MFCC coefficients × 174 time frames
 
-        ### Model Architectures
-
-        **SVM:** RBF kernel with hyperparameter tuning (C, gamma)  
-        **Random Forest:** 200 trees with optimized depth and split parameters
-        **Gradient Boosting:** Histogram-based gradient boosting with L2 regularization
-        **CNN:** 2 Conv2D layers (32, 64 filters) + Dense layers with dropout (30%)
-
-        ### Performance Notes
-        - All models trained with 10-fold cross-validation on UrbanSound8K
-        - CNN achieves 91.55% accuracy (best performing)
-        - Traditional models: 48-53% accuracy range
-        - Demo mode uses deterministic simulated predictions when models not loaded
+        ### Results Interpretation
+        - **Green bars:** Correct predictions
+        - **Red bars:** Incorrect predictions  
+        - **Confidence scores:** Model certainty (0-100%)
+        - **Agreement analysis:** How many models agreed on the prediction
         """)
 
     # Footer
     st.markdown("---")
     st.markdown("""
     <div style='text-align: center; color: #666; font-size: 14px;'>
-    🎵 <strong>UrbanSound8K Audio Classifier</strong> | Built with Streamlit & TensorFlow<br>
-    Based on J. Salamon et al. "A Dataset and Taxonomy for Urban Sound Research" (ACM-MM'14)
+    🎵 <strong>UrbanSound8K Classification Results</strong> | Pre-tested Cross-Validation Data<br>
+    Select different audio files to explore model performance across the dataset
     </div>
     """, unsafe_allow_html=True)
 
