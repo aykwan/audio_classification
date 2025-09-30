@@ -50,9 +50,9 @@ class AudioDataLoader:
             # Load CSV results
             if os.path.exists(self.csv_file):
                 self.results_df = pd.read_csv(self.csv_file)
-                st.sidebar.success(f"Loaded {len(self.results_df)} test results")
+                st.sidebar.success(f"✅ Loaded {len(self.results_df)} test results")
             else:
-                st.sidebar.error(f"Results file not found: {self.csv_file}")
+                st.sidebar.error(f"❌ Results file not found: {self.csv_file}")
                 return
 
             # Discover audio files in Data folder
@@ -70,10 +70,10 @@ class AudioDataLoader:
             self.audio_files = [os.path.basename(f) for f in self.audio_files]
             self.audio_files = sorted(list(set(self.audio_files)))  # Remove duplicates and sort
 
-            st.sidebar.info(f"Found {len(self.audio_files)} audio files")
+            st.sidebar.info(f"📁 Found {len(self.audio_files)} audio files")
 
         except Exception as e:
-            st.sidebar.error(f"Error loading data: {str(e)}")
+            st.sidebar.error(f"❌ Error loading data: {str(e)}")
 
     def get_file_results(self, filename: str) -> Optional[Dict[str, Any]]:
         """Get results for a specific audio file from CSV"""
@@ -89,37 +89,49 @@ class AudioDataLoader:
         # Get the first match (there should only be one)
         result = file_results.iloc[0]
 
+        # Build models dictionary - check if CNN_logmel columns exist
+        models_dict = {
+            'SVM': {
+                'predicted': result['svm_predicted'],
+                'predicted_name': result['svm_predicted_name'],
+                'confidence': result['svm_confidence'],
+                'correct': bool(result['svm_correct'])
+            },
+            'Random Forest': {
+                'predicted': result['rf_predicted'],
+                'predicted_name': result['rf_predicted_name'],
+                'confidence': result['rf_confidence'],
+                'correct': bool(result['rf_correct'])
+            },
+            'Gradient Boosting': {
+                'predicted': result['gb_predicted'],
+                'predicted_name': result['gb_predicted_name'],
+                'confidence': result['gb_confidence'],
+                'correct': bool(result['gb_correct'])
+            },
+            'CNN (MFCC)': {
+                'predicted': result['cnn_predicted'],
+                'predicted_name': result['cnn_predicted_name'],
+                'confidence': result['cnn_confidence'],
+                'correct': bool(result['cnn_correct'])
+            }
+        }
+
+        # Add CNN_logmel if columns exist
+        if 'cnn_logmel_predicted' in result.index:
+            models_dict['CNN (LogMel)'] = {
+                'predicted': result['cnn_logmel_predicted'],
+                'predicted_name': result['cnn_logmel_predicted_name'],
+                'confidence': result['cnn_logmel_confidence'],
+                'correct': bool(result['cnn_logmel_correct'])
+            }
+
         return {
             'filename': result['slice_file_name'],
             'actual_class': result['actual_class'],
             'actual_class_name': result['actual_class_name'],
             'fold': result.get('fold', 'Unknown'),
-            'models': {
-                'SVM': {
-                    'predicted': result['svm_predicted'],
-                    'predicted_name': result['svm_predicted_name'],
-                    'confidence': result['svm_confidence'],
-                    'correct': bool(result['svm_correct'])
-                },
-                'Random Forest': {
-                    'predicted': result['rf_predicted'],
-                    'predicted_name': result['rf_predicted_name'],
-                    'confidence': result['rf_confidence'],
-                    'correct': bool(result['rf_correct'])
-                },
-                'Gradient Boosting': {
-                    'predicted': result['gb_predicted'],
-                    'predicted_name': result['gb_predicted_name'],
-                    'confidence': result['gb_confidence'],
-                    'correct': bool(result['gb_correct'])
-                },
-                'CNN': {
-                    'predicted': result['cnn_predicted'],
-                    'predicted_name': result['cnn_predicted_name'],
-                    'confidence': result['cnn_confidence'],
-                    'correct': bool(result['cnn_correct'])
-                }
-            },
+            'models': models_dict,
             'ensemble': {
                 'predicted': result.get('ensemble_predicted', 'N/A'),
                 'predicted_name': result.get('ensemble_predicted_name', 'N/A'),
@@ -164,6 +176,38 @@ class AudioVisualizer:
             return None
 
     @staticmethod
+    def plot_logmel_spectrogram(audio_path: str) -> plt.Figure:
+        """Plot Log-Mel Spectrogram features"""
+        try:
+            y, sr = librosa.load(audio_path, sr=None, mono=True)
+
+            # Create log-mel spectrogram
+            mel_spec = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=128, fmax=8000)
+            log_mel_spec = librosa.power_to_db(mel_spec, ref=np.max)
+
+            fig, ax = plt.subplots(figsize=(14, 8))
+
+            im = ax.imshow(log_mel_spec, 
+                          aspect='auto', 
+                          origin='lower',
+                          cmap='viridis',
+                          interpolation='nearest')
+
+            cbar = plt.colorbar(im, ax=ax, format='%+2.0f dB')
+            cbar.set_label('Log-Mel Magnitude (dB)', rotation=270, labelpad=15)
+
+            ax.set_title('Log-Mel Spectrogram Features', fontsize=16, fontweight='bold')
+            ax.set_xlabel('Time Frames', fontsize=12)
+            ax.set_ylabel('Mel Frequency Bands', fontsize=12)
+            ax.grid(True, alpha=0.3)
+
+            plt.tight_layout()
+            return fig
+        except Exception as e:
+            st.error(f"Error plotting log-mel spectrogram: {e}")
+            return None
+
+    @staticmethod
     def plot_waveform(audio_path: str) -> plt.Figure:
         """Plot audio waveform"""
         try:
@@ -185,37 +229,50 @@ class AudioVisualizer:
     @staticmethod
     def plot_model_predictions(results: Dict[str, Any]) -> plt.Figure:
         """Plot all model predictions as comparison chart"""
-        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(16, 12))
-        axes = [ax1, ax2, ax3, ax4]
-        models = ['SVM', 'Random Forest', 'Gradient Boosting', 'CNN']
+        models = list(results['models'].keys())
+        num_models = len(models)
 
-        for i, (model, ax) in enumerate(zip(models, axes)):
-            model_data = results['models'][model]
+        # Dynamic subplot layout based on number of models
+        if num_models <= 4:
+            fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+            axes = axes.flatten()
+        else:  # 5 models
+            fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+            axes = axes.flatten()
 
-            # Create a simple bar showing prediction vs actual
-            categories = ['Predicted', 'Actual']
-            pred_class = model_data['predicted']
-            actual_class = results['actual_class']
+        for i, model in enumerate(models):
+            if i < len(axes):
+                ax = axes[i]
+                model_data = results['models'][model]
 
-            bars = ax.bar(categories, [pred_class, actual_class], 
-                         color=['orange' if model_data['correct'] else 'red', 'green'],
-                         alpha=0.7)
+                # Create a simple bar showing prediction vs actual
+                categories = ['Predicted', 'Actual']
+                pred_class = model_data['predicted']
+                actual_class = results['actual_class']
 
-            ax.set_title(f"{model} - {'Correct' if model_data['correct'] else 'Wrong'}", 
-                        fontweight='bold')
-            ax.set_ylabel('Class ID')
-            ax.set_ylim(0, 9)
+                bars = ax.bar(categories, [pred_class, actual_class], 
+                             color=['orange' if model_data['correct'] else 'red', 'green'],
+                             alpha=0.7)
 
-            # Add text labels
-            ax.text(0, pred_class + 0.1, f"{model_data['predicted_name']}", 
-                   ha='center', fontweight='bold')
-            ax.text(1, actual_class + 0.1, f"{results['actual_class_name']}", 
-                   ha='center', fontweight='bold')
+                ax.set_title(f"{model}\n{'✅ Correct' if model_data['correct'] else '❌ Wrong'}", 
+                            fontweight='bold')
+                ax.set_ylabel('Class ID')
+                ax.set_ylim(0, 9)
 
-            # Add confidence score
-            ax.text(0.02, 0.98, f'Confidence: {model_data["confidence"]:.1%}', 
-                    transform=ax.transAxes, fontweight='bold',
-                    bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.8))
+                # Add text labels
+                ax.text(0, pred_class + 0.1, f"{model_data['predicted_name']}", 
+                       ha='center', fontweight='bold', fontsize=8)
+                ax.text(1, actual_class + 0.1, f"{results['actual_class_name']}", 
+                       ha='center', fontweight='bold', fontsize=8)
+
+                # Add confidence score
+                ax.text(0.02, 0.98, f'Confidence: {model_data["confidence"]:.1%}', 
+                        transform=ax.transAxes, fontweight='bold', fontsize=9,
+                        bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.8))
+
+        # Hide unused subplots
+        for i in range(len(models), len(axes)):
+            axes[i].set_visible(False)
 
         plt.suptitle(f'Model Predictions for {results["filename"]}', fontsize=16, fontweight='bold')
         plt.tight_layout()
@@ -224,7 +281,7 @@ class AudioVisualizer:
     @staticmethod
     def plot_confidence_comparison(results: Dict[str, Any]) -> plt.Figure:
         """Plot confidence scores for all models"""
-        fig, ax = plt.subplots(figsize=(12, 6))
+        fig, ax = plt.subplots(figsize=(14, 6))
 
         models = list(results['models'].keys())
         confidences = [results['models'][model]['confidence'] for model in models]
@@ -251,6 +308,10 @@ class AudioVisualizer:
                           Patch(facecolor='red', alpha=0.7, label='Incorrect')]
         ax.legend(handles=legend_elements, loc='upper right')
 
+        # Rotate x-axis labels if many models
+        if len(models) > 4:
+            plt.xticks(rotation=15, ha='right')
+
         plt.grid(axis='y', alpha=0.3)
         plt.tight_layout()
         return fig
@@ -272,30 +333,35 @@ def main():
     # Description
     st.markdown("""
     This application displays the results from our comprehensive testing of UrbanSound8K audio classification 
-    using four different machine learning models. Select an audio file from the dropdown to see how each 
+    using multiple machine learning models. Select an audio file from the dropdown to see how each 
     model performed on that specific sample.
 
     **Models Tested:**
     - 🎯 **SVM** (Support Vector Machine) - Traditional ML approach
     - 🌲 **Random Forest** - Ensemble method with decision trees  
     - 🚀 **Gradient Boosting** - Advanced boosting technique
-    - 🧠 **CNN** (Convolutional Neural Network) - Deep learning approach
+    - 🧠 **CNN (MFCC)** - Deep learning with MFCC features
+    - 🔊 **CNN (LogMel)** - Deep learning with Log-Mel Spectrogram features
     """)
 
     # Sidebar
-    st.sidebar.title("Dataset Information")
+    st.sidebar.title("📊 Dataset Information")
 
     if data_loader.results_df is not None:
         # Overall statistics
-        st.sidebar.subheader("Overall Accuracies")
+        st.sidebar.subheader("🎯 Overall Accuracies")
         total_samples = len(data_loader.results_df)
 
         accuracies = {
             'SVM': data_loader.results_df['svm_correct'].mean(),
             'Random Forest': data_loader.results_df['rf_correct'].mean(),
             'Gradient Boosting': data_loader.results_df['gb_correct'].mean(),
-            'CNN': data_loader.results_df['cnn_correct'].mean()
+            'CNN (MFCC)': data_loader.results_df['cnn_correct'].mean()
         }
+
+        # Add CNN LogMel if available
+        if 'cnn_logmel_correct' in data_loader.results_df.columns:
+            accuracies['CNN (LogMel)'] = data_loader.results_df['cnn_logmel_correct'].mean()
 
         for model, acc in accuracies.items():
             st.sidebar.write(f"**{model}:** {acc:.1%}")
@@ -309,7 +375,7 @@ def main():
         st.sidebar.markdown("---")
 
         # Class distribution
-        st.sidebar.subheader("Class Distribution")
+        st.sidebar.subheader("📈 Class Distribution")
         class_counts = data_loader.results_df['actual_class_name'].value_counts()
         for class_name, count in class_counts.items():
             emoji = ['❄️', '🚗', '👶', '🐕', '🔧', '🚙', '🔫', '🔨', '🚨', '🎵'][
@@ -324,7 +390,7 @@ def main():
         st.subheader("🎵 Select Audio File")
 
         if not data_loader.audio_files:
-            st.error("No audio files found in Data folder")
+            st.error("❌ No audio files found in Data folder")
             st.info("Expected folder structure: Data/{audio_files}")
             return
 
@@ -341,12 +407,12 @@ def main():
             results = data_loader.get_file_results(selected_file)
 
             if results is None:
-                st.error(f"No results found for {selected_file}")
+                st.error(f"❌ No results found for {selected_file}")
                 st.info("Make sure the file was included in the cross-validation testing.")
                 return
 
             # Display file info
-            st.success(f"File selected: {selected_file}")
+            st.success(f"✅ File selected: {selected_file}")
 
             # Audio player (try to find and play the file)
             audio_path = None
@@ -376,7 +442,8 @@ def main():
             # Processing options
             st.subheader("⚙️ Display Options")
             show_waveform = st.checkbox("Show Waveform", value=True)
-            show_features = st.checkbox("Show MFCC Features", value=True)
+            show_mfcc = st.checkbox("Show MFCC Features", value=True)
+            show_logmel = st.checkbox("Show Log-Mel Spectrogram", value=True)
             show_confidence = st.checkbox("Show Confidence Comparison", value=True)
 
     with col2:
@@ -393,7 +460,7 @@ def main():
                     'Predicted': f"{model_data['predicted']} ({model_data['predicted_name'].replace('_', ' ').title()})",
                     'Actual': f"{results['actual_class']} ({results['actual_class_name'].replace('_', ' ').title()})",
                     'Confidence': f"{model_data['confidence']:.1%}",
-                    'Result': "Correct" if model_data['correct'] else "Wrong"
+                    'Result': "✅ Correct" if model_data['correct'] else "❌ Wrong"
                 })
 
             # Add ensemble if available
@@ -403,7 +470,7 @@ def main():
                     'Predicted': f"{results['ensemble']['predicted']} ({results['ensemble']['predicted_name'].replace('_', ' ').title()})",
                     'Actual': f"{results['actual_class']} ({results['actual_class_name'].replace('_', ' ').title()})",
                     'Confidence': "N/A",
-                    'Result': "Correct" if results['ensemble']['correct'] else "Wrong"
+                    'Result': "✅ Correct" if results['ensemble']['correct'] else "❌ Wrong"
                 })
 
             summary_df = pd.DataFrame(summary_data)
@@ -415,11 +482,12 @@ def main():
                 1: "🟢 All models agree",
                 2: "🟡 Models split into 2 groups", 
                 3: "🟠 3 different predictions",
-                4: "🔴 All models disagree"
+                4: "🟠 4 different predictions",
+                5: "🔴 All models disagree"
             }
 
             agreement_level = results['model_agreement']
-            st.info(f"**Agreement Level:** {agreement_text.get(agreement_level, 'Unknown')}")
+            st.info(f"**Agreement Level:** {agreement_text.get(agreement_level, f'{agreement_level} different predictions')}")
 
             # Visualizations
             if audio_path:
@@ -430,12 +498,19 @@ def main():
                         st.pyplot(fig_wave)
                         plt.close(fig_wave)
 
-                if show_features:
+                if show_mfcc:
                     st.subheader("📈 MFCC Features")
                     fig_mfcc = AudioVisualizer.plot_mfcc_features(audio_path)
                     if fig_mfcc:
                         st.pyplot(fig_mfcc)
                         plt.close(fig_mfcc)
+
+                if show_logmel:
+                    st.subheader("🔊 Log-Mel Spectrogram Features")
+                    fig_logmel = AudioVisualizer.plot_logmel_spectrogram(audio_path)
+                    if fig_logmel:
+                        st.pyplot(fig_logmel)
+                        plt.close(fig_logmel)
 
             # Model predictions visualization
             st.subheader("🎯 Model Predictions Comparison")
@@ -467,24 +542,29 @@ def main():
                     with col_c:
                         st.metric("Confidence", f"{model_data['confidence']:.2%}")
                     with col_d:
-                        result_color = "normal" if model_data['correct'] else "inverse"
-                        st.metric("Result", "Correct" if model_data['correct'] else "Wrong")
+                        st.metric("Result", "✅ Correct" if model_data['correct'] else "❌ Wrong")
 
                     # Analysis
                     if model_data['correct']:
-                        st.success(f"{model_name} correctly identified this as {model_data['predicted_name'].replace('_', ' ').title()}")
+                        st.success(f"🎯 {model_name} correctly identified this as {model_data['predicted_name'].replace('_', ' ').title()}")
                     else:
-                        st.error(f"{model_name} incorrectly predicted {model_data['predicted_name'].replace('_', ' ').title()} when it was actually {results['actual_class_name'].replace('_', ' ').title()}")
+                        st.error(f"❌ {model_name} incorrectly predicted {model_data['predicted_name'].replace('_', ' ').title()} when it was actually {results['actual_class_name'].replace('_', ' ').title()}")
 
                     st.write(f"**Confidence Level:** {model_data['confidence']:.1%}")
 
                     # Confidence interpretation
                     if model_data['confidence'] > 0.8:
-                        st.info("High confidence prediction")
+                        st.info("🔥 High confidence prediction")
                     elif model_data['confidence'] > 0.6:
-                        st.info("Moderate confidence prediction")
+                        st.info("🎯 Moderate confidence prediction")
                     else:
-                        st.warning("Low confidence prediction")
+                        st.warning("⚠️ Low confidence prediction")
+
+                    # Model-specific insights
+                    if model_name == "CNN (MFCC)":
+                        st.info("📈 This CNN model uses Mel-Frequency Cepstral Coefficients (MFCC) features")
+                    elif model_name == "CNN (LogMel)":
+                        st.info("🔊 This CNN model uses Log-Mel Spectrogram features")
 
     # Technical details
     with st.expander("🔧 About This Analysis"):
@@ -498,25 +578,31 @@ def main():
         - **SVM:** Traditional machine learning with RBF kernel
         - **Random Forest:** 200-tree ensemble with optimized parameters
         - **Gradient Boosting:** Histogram-based gradient boosting
-        - **CNN:** Deep learning with convolutional layers
+        - **CNN (MFCC):** Deep learning with MFCC coefficient features
+        - **CNN (LogMel):** Deep learning with Log-Mel Spectrogram features
 
         ### Features Used
         - **Traditional Models:** 26 features (13 MFCC + 13 Delta MFCC coefficients)
-        - **CNN Model:** 40 MFCC coefficients × 174 time frames
+        - **CNN (MFCC):** 40 MFCC coefficients × 174 time frames
+        - **CNN (LogMel):** Log-Mel Spectrogram with 128 mel bands
 
         ### Results Interpretation
         - **Green bars:** Correct predictions
         - **Red bars:** Incorrect predictions  
         - **Confidence scores:** Model certainty (0-100%)
         - **Agreement analysis:** How many models agreed on the prediction
+
+        ### Feature Comparison
+        - **MFCC Features:** Focus on spectral shape, good for speech-like sounds
+        - **Log-Mel Features:** Full spectral information, better for complex acoustic patterns
         """)
 
     # Footer
     st.markdown("---")
     st.markdown("""
     <div style='text-align: center; color: #666; font-size: 14px;'>
-    🎵 <strong>UrbanSound8K Classification Results</strong> | Pre-tested Cross-Validation Data<br>
-    Select different audio files to explore model performance across the dataset
+    🎵 <strong>UrbanSound8K Classification Results</strong> | 5-Model Comparison Analysis<br>
+    Compare MFCC vs Log-Mel CNN approaches alongside traditional ML methods
     </div>
     """, unsafe_allow_html=True)
 
