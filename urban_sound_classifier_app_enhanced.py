@@ -298,9 +298,10 @@ class AudioVisualizer:
         # Add value labels on bars
         for bar, conf in zip(bars, confidences):
             height = bar.get_height()
-            ax.text(bar.get_x() + bar.get_width()/2., height + 0.01,
-                    f'{conf:.1%}',
-                    ha='center', va='bottom', fontweight='bold')
+            ax.text(bar.get_x() + bar.get_width()/2., height/2,
+                f'{conf:.1%}',
+                ha='center', va='center', fontweight='bold', 
+                color='white', fontsize=12)
 
         # Add legend
         from matplotlib.patches import Patch
